@@ -4,10 +4,17 @@ from PIL import Image
 from transformers import GLPNImageProcessor, GLPNForDepthEstimation
 import torch
 import numpy as np
-import open3d as o3d
 import tempfile
 import os
 import plotly.graph_objects as go
+
+# Try to import Open3D, fallback if not available
+try:
+    import open3d as o3d
+    OPEN3D_AVAILABLE = True
+except Exception as e:
+    OPEN3D_AVAILABLE = False
+    st.warning(f"⚠️ Open3D not available: {str(e)[:100]}... Using point cloud visualization instead.")
 
 # Set page config
 st.set_page_config(page_title="2D to 3D Reconstruction", layout="wide")
@@ -46,38 +53,81 @@ def process_image(image, feature_extractor, model):
     return image, depth_output
 
 def create_3d_mesh(image, depth_output):
+    if not OPEN3D_AVAILABLE:
+        return None, None
+    
+    try:
+        width, height = image.size
+        depth_image = (depth_output * 255 / np.max(depth_output)).astype('uint8')
+        image_array = np.array(image)
+        
+        # Create Open3D objects
+        depth_o3d = o3d.geometry.Image(depth_image)
+        image_o3d = o3d.geometry.Image(image_array)
+        rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
+            image_o3d, depth_o3d, convert_rgb_to_intensity=False
+        )
+        
+        # Camera intrinsics
+        camera_intrinsic = o3d.camera.PinholeCameraIntrinsic()
+        camera_intrinsic.set_intrinsics(width, height, 500, 500, width/2, height/2)
+        
+        # Create point cloud
+        pcd_raw = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd_image, camera_intrinsic)
+        
+        # Simplified processing to avoid segfault
+        if len(pcd_raw.points) == 0:
+            return None, None
+            
+        # Basic outlier removal (reduced parameters)
+        cl, ind = pcd_raw.remove_statistical_outlier(nb_neighbors=10, std_ratio=2.0)
+        pcd = pcd_raw.select_by_index(ind)
+        
+        if len(pcd.points) == 0:
+            return None, None
+        
+        # Estimate normals
+        pcd.estimate_normals()
+        
+        # Simplified Poisson reconstruction (reduced depth)
+        mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=10, n_threads=1)[0]
+        
+        if len(mesh.vertices) == 0:
+            return None, None
+            
+        rotation = mesh.get_rotation_matrix_from_xyz((np.pi, 0, 0))
+        mesh.rotate(rotation, center=(0, 0, 0))
+        
+        return mesh, pcd
+        
+    except Exception as e:
+        st.error(f"Open3D processing failed: {str(e)}")
+        return None, None
+
+def create_3d_point_cloud_fallback(image, depth_output):
     width, height = image.size
-    depth_image = (depth_output * 255 / np.max(depth_output)).astype('uint8')
     image_array = np.array(image)
     
-    # Create Open3D objects
-    depth_o3d = o3d.geometry.Image(depth_image)
-    image_o3d = o3d.geometry.Image(image_array)
-    rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
-        image_o3d, depth_o3d, convert_rgb_to_intensity=False
-    )
+    # Create coordinate grids
+    x, y = np.meshgrid(np.arange(width), np.arange(height))
     
-    # Camera intrinsics
-    camera_intrinsic = o3d.camera.PinholeCameraIntrinsic()
-    camera_intrinsic.set_intrinsics(width, height, 500, 500, width/2, height/2)
+    # Camera parameters
+    focal_length = 500
+    cx, cy = width / 2, height / 2
     
-    # Create point cloud
-    pcd_raw = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd_image, camera_intrinsic)
+    # Convert to 3D coordinates
+    z = depth_output
+    x_3d = (x - cx) * z / focal_length
+    y_3d = (y - cy) * z / focal_length
     
-    # Outlier removal
-    cl, ind = pcd_raw.remove_statistical_outlier(nb_neighbors=30, std_ratio=3.0)
-    pcd = pcd_raw.select_by_index(ind)
+    # Flatten and subsample
+    step = 4
+    x_flat = x_3d.flatten()[::step]
+    y_flat = y_3d.flatten()[::step]
+    z_flat = z.flatten()[::step]
+    colors = image_array.reshape(-1, 3)[::step] / 255.0
     
-    # Estimate normals
-    pcd.estimate_normals()
-    pcd.orient_normals_to_align_with_direction()
-    
-    # Create mesh
-    mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=15, n_threads=1)[0]
-    rotation = mesh.get_rotation_matrix_from_xyz((np.pi, 0, 0))
-    mesh.rotate(rotation, center=(0, 0, 0))
-    
-    return mesh, pcd
+    return x_flat, y_flat, z_flat, colors
 
 def mesh_to_plotly(mesh):
     vertices = np.asarray(mesh.vertices)
@@ -114,6 +164,33 @@ def mesh_to_plotly(mesh):
     
     return fig
 
+def point_cloud_to_plotly(x, y, z, colors):
+    fig = go.Figure(data=[
+        go.Scatter3d(
+            x=x, y=y, z=z,
+            mode='markers',
+            marker=dict(
+                size=2,
+                color=colors,
+                opacity=0.8
+            )
+        )
+    ])
+    
+    fig.update_layout(
+        scene=dict(
+            xaxis_title='X',
+            yaxis_title='Y',
+            zaxis_title='Z',
+            aspectmode='data'
+        ),
+        width=800,
+        height=600,
+        title="3D Point Cloud"
+    )
+    
+    return fig
+
 # Main app
 st.title("🎯 2D to 3D Object Reconstruction")
 st.write("Upload a 2D image to generate its 3D reconstruction using depth estimation")
@@ -132,7 +209,7 @@ if uploaded_file is not None:
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("Original Image")
-        st.image(image, use_column_width=True)
+        st.image(image, use_container_width=True)
     
     # Process image
     with st.spinner("Processing image and generating 3D model..."):
@@ -147,43 +224,73 @@ if uploaded_file is not None:
             st.pyplot(fig)
             plt.close()
         
-        # Create 3D mesh
-        mesh, pcd = create_3d_mesh(processed_image, depth_output)
-        
-        # Convert to plotly and display
-        plotly_fig = mesh_to_plotly(mesh)
-        st.subheader("3D Reconstruction")
+        # Create 3D visualization
+        mesh, pcd = None, None
+        try:
+            if OPEN3D_AVAILABLE:
+                mesh, pcd = create_3d_mesh(processed_image, depth_output)
+                if mesh is not None:
+                    plotly_fig = mesh_to_plotly(mesh)
+                    st.subheader("3D Mesh Reconstruction")
+                else:
+                    raise Exception("Mesh creation failed")
+            else:
+                raise Exception("Open3D not available")
+        except Exception as e:
+            st.warning(f"⚠️ Mesh reconstruction failed: {str(e)[:50]}... Using point cloud instead.")
+            x, y, z, colors = create_3d_point_cloud_fallback(processed_image, depth_output)
+            plotly_fig = point_cloud_to_plotly(x, y, z, colors)
+            st.subheader("3D Point Cloud Reconstruction")
+            mesh, pcd = None, None
+            
         st.plotly_chart(plotly_fig, use_container_width=True)
         
         # Download options
-        st.subheader("Download 3D Model")
-        col3, col4 = st.columns(2)
+        st.subheader("Download 3D Data")
         
-        with col3:
-            if st.button("Save as PLY"):
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.ply') as tmp_file:
-                    o3d.io.write_triangle_mesh(tmp_file.name, mesh)
-                    with open(tmp_file.name, 'rb') as f:
-                        st.download_button(
-                            label="Download PLY file",
-                            data=f.read(),
-                            file_name="3d_model.ply",
-                            mime="application/octet-stream"
-                        )
-                    os.unlink(tmp_file.name)
-        
-        with col4:
-            if st.button("Save Point Cloud"):
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.pcd') as tmp_file:
-                    o3d.io.write_point_cloud(tmp_file.name, pcd)
-                    with open(tmp_file.name, 'rb') as f:
-                        st.download_button(
-                            label="Download PCD file", 
-                            data=f.read(),
-                            file_name="point_cloud.pcd",
-                            mime="application/octet-stream"
-                        )
-                    os.unlink(tmp_file.name)
+        if OPEN3D_AVAILABLE and mesh is not None:
+            col3, col4 = st.columns(2)
+            with col3:
+                if st.button("Save as PLY"):
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.ply') as tmp_file:
+                        o3d.io.write_triangle_mesh(tmp_file.name, mesh)
+                        with open(tmp_file.name, 'rb') as f:
+                            st.download_button(
+                                label="Download PLY file",
+                                data=f.read(),
+                                file_name="3d_model.ply",
+                                mime="application/octet-stream"
+                            )
+                        os.unlink(tmp_file.name)
+            
+            with col4:
+                if st.button("Save Point Cloud"):
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.pcd') as tmp_file:
+                        o3d.io.write_point_cloud(tmp_file.name, pcd)
+                        with open(tmp_file.name, 'rb') as f:
+                            st.download_button(
+                                label="Download PCD file", 
+                                data=f.read(),
+                                file_name="point_cloud.pcd",
+                                mime="application/octet-stream"
+                            )
+                        os.unlink(tmp_file.name)
+        else:
+            if st.button("Save Point Cloud as CSV"):
+                try:
+                    point_data = np.column_stack([x, y, z, colors])
+                    csv_data = "x,y,z,r,g,b\n"
+                    for point in point_data:
+                        csv_data += f"{point[0]:.6f},{point[1]:.6f},{point[2]:.6f},{point[3]:.6f},{point[4]:.6f},{point[5]:.6f}\n"
+                    
+                    st.download_button(
+                        label="Download CSV file",
+                        data=csv_data,
+                        file_name="3d_point_cloud.csv",
+                        mime="text/csv"
+                    )
+                except Exception as e:
+                    st.error(f"Failed to create CSV: {str(e)}")
 
 else:
     st.info("Please upload an image to start the 3D reconstruction process")
@@ -196,8 +303,12 @@ else:
         st.write("**Input: 2D Image**")
         st.write("📷 Upload any photo")
     with example_col2:
-        st.write("**Output: 3D Model**") 
-        st.write("🎯 Interactive 3D reconstruction")
+        if OPEN3D_AVAILABLE:
+            st.write("**Output: 3D Model**") 
+            st.write("🎯 Interactive 3D reconstruction")
+        else:
+            st.write("**Output: 3D Point Cloud**") 
+            st.write("🎯 Interactive 3D point cloud")
 
 # Processing time and model info
 st.markdown("---")
