@@ -8,13 +8,8 @@ import tempfile
 import os
 import plotly.graph_objects as go
 
-# Try to import Open3D, fallback if not available
-try:
-    import open3d as o3d
-    OPEN3D_AVAILABLE = True
-except Exception as e:
-    OPEN3D_AVAILABLE = False
-    st.warning(f"⚠️ Open3D not available: {str(e)[:100]}... Using point cloud visualization instead.")
+# Disable Open3D to prevent segmentation faults on Streamlit Cloud
+OPEN3D_AVAILABLE = False
 
 # Set page config
 st.set_page_config(page_title="2D to 3D Reconstruction", layout="wide")
@@ -209,7 +204,7 @@ if uploaded_file is not None:
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("Original Image")
-        st.image(image, use_container_width=True)
+        st.image(image, width='stretch')
     
     # Process image
     with st.spinner("Processing image and generating 3D model..."):
@@ -224,73 +219,30 @@ if uploaded_file is not None:
             st.pyplot(fig)
             plt.close()
         
-        # Create 3D visualization
-        mesh, pcd = None, None
-        try:
-            if OPEN3D_AVAILABLE:
-                mesh, pcd = create_3d_mesh(processed_image, depth_output)
-                if mesh is not None:
-                    plotly_fig = mesh_to_plotly(mesh)
-                    st.subheader("3D Mesh Reconstruction")
-                else:
-                    raise Exception("Mesh creation failed")
-            else:
-                raise Exception("Open3D not available")
-        except Exception as e:
-            st.warning(f"⚠️ Mesh reconstruction failed: {str(e)[:50]}... Using point cloud instead.")
-            x, y, z, colors = create_3d_point_cloud_fallback(processed_image, depth_output)
-            plotly_fig = point_cloud_to_plotly(x, y, z, colors)
-            st.subheader("3D Point Cloud Reconstruction")
-            mesh, pcd = None, None
+        # Create 3D point cloud visualization
+        x, y, z, colors = create_3d_point_cloud_fallback(processed_image, depth_output)
+        plotly_fig = point_cloud_to_plotly(x, y, z, colors)
+        st.subheader("3D Point Cloud Reconstruction")
             
-        st.plotly_chart(plotly_fig, use_container_width=True)
+        st.plotly_chart(plotly_fig, width='stretch')
         
         # Download options
         st.subheader("Download 3D Data")
-        
-        if OPEN3D_AVAILABLE and mesh is not None:
-            col3, col4 = st.columns(2)
-            with col3:
-                if st.button("Save as PLY"):
-                    with tempfile.NamedTemporaryFile(delete=False, suffix='.ply') as tmp_file:
-                        o3d.io.write_triangle_mesh(tmp_file.name, mesh)
-                        with open(tmp_file.name, 'rb') as f:
-                            st.download_button(
-                                label="Download PLY file",
-                                data=f.read(),
-                                file_name="3d_model.ply",
-                                mime="application/octet-stream"
-                            )
-                        os.unlink(tmp_file.name)
-            
-            with col4:
-                if st.button("Save Point Cloud"):
-                    with tempfile.NamedTemporaryFile(delete=False, suffix='.pcd') as tmp_file:
-                        o3d.io.write_point_cloud(tmp_file.name, pcd)
-                        with open(tmp_file.name, 'rb') as f:
-                            st.download_button(
-                                label="Download PCD file", 
-                                data=f.read(),
-                                file_name="point_cloud.pcd",
-                                mime="application/octet-stream"
-                            )
-                        os.unlink(tmp_file.name)
-        else:
-            if st.button("Save Point Cloud as CSV"):
-                try:
-                    point_data = np.column_stack([x, y, z, colors])
-                    csv_data = "x,y,z,r,g,b\n"
-                    for point in point_data:
-                        csv_data += f"{point[0]:.6f},{point[1]:.6f},{point[2]:.6f},{point[3]:.6f},{point[4]:.6f},{point[5]:.6f}\n"
-                    
-                    st.download_button(
-                        label="Download CSV file",
-                        data=csv_data,
-                        file_name="3d_point_cloud.csv",
-                        mime="text/csv"
-                    )
-                except Exception as e:
-                    st.error(f"Failed to create CSV: {str(e)}")
+        if st.button("Save Point Cloud as CSV"):
+            try:
+                point_data = np.column_stack([x, y, z, colors])
+                csv_data = "x,y,z,r,g,b\n"
+                for point in point_data:
+                    csv_data += f"{point[0]:.6f},{point[1]:.6f},{point[2]:.6f},{point[3]:.6f},{point[4]:.6f},{point[5]:.6f}\n"
+                
+                st.download_button(
+                    label="Download CSV file",
+                    data=csv_data,
+                    file_name="3d_point_cloud.csv",
+                    mime="text/csv"
+                )
+            except Exception as e:
+                st.error(f"Failed to create CSV: {str(e)}")
 
 else:
     st.info("Please upload an image to start the 3D reconstruction process")
@@ -303,12 +255,8 @@ else:
         st.write("**Input: 2D Image**")
         st.write("📷 Upload any photo")
     with example_col2:
-        if OPEN3D_AVAILABLE:
-            st.write("**Output: 3D Model**") 
-            st.write("🎯 Interactive 3D reconstruction")
-        else:
-            st.write("**Output: 3D Point Cloud**") 
-            st.write("🎯 Interactive 3D point cloud")
+        st.write("**Output: 3D Point Cloud**") 
+        st.write("🎯 Interactive 3D point cloud")
 
 # Processing time and model info
 st.markdown("---")
