@@ -1,0 +1,7 @@
+streamlit
+torch
+transformers
+pillow
+numpy
+matplotlib
+plotly
