@@ -5,4 +5,3 @@ pillow
 numpy
 matplotlib
 plotly
-scipy
