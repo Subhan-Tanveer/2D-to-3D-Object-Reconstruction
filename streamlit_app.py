@@ -100,13 +100,8 @@ def create_3d_mesh(image, depth_output):
         return None, None
 
 def create_3d_point_cloud_fallback(image, depth_output):
-    from scipy import ndimage
-    
     width, height = image.size
     image_array = np.array(image)
-    
-    # Smooth depth map to reduce noise
-    depth_smooth = ndimage.gaussian_filter(depth_output, sigma=1.0)
     
     # Create coordinate grids
     x, y = np.meshgrid(np.arange(width), np.arange(height))
@@ -116,26 +111,18 @@ def create_3d_point_cloud_fallback(image, depth_output):
     cx, cy = width / 2, height / 2
     
     # Convert to 3D coordinates
-    z = depth_smooth
+    z = depth_output
     x_3d = (x - cx) * z / focal_length
     y_3d = (y - cy) * z / focal_length
     
-    # Remove outliers based on depth values
-    depth_median = np.median(z)
-    depth_std = np.std(z)
-    valid_mask = np.abs(z - depth_median) < 2 * depth_std
+    # Flatten and subsample
+    step = 4
+    x_flat = x_3d.flatten()[::step]
+    y_flat = y_3d.flatten()[::step]
+    z_flat = z.flatten()[::step]
+    colors = image_array.reshape(-1, 3)[::step] / 255.0
     
-    # Apply mask and flatten
-    x_valid = x_3d[valid_mask]
-    y_valid = y_3d[valid_mask]
-    z_valid = z[valid_mask]
-    colors_valid = image_array[valid_mask] / 255.0
-    
-    # Subsample for performance (every 3rd point for better quality)
-    step = 3
-    indices = np.arange(0, len(x_valid), step)
-    
-    return x_valid[indices], y_valid[indices], z_valid[indices], colors_valid[indices]
+    return x_flat, y_flat, z_flat, colors
 
 def mesh_to_plotly(mesh):
     vertices = np.asarray(mesh.vertices)
@@ -173,58 +160,28 @@ def mesh_to_plotly(mesh):
     return fig
 
 def point_cloud_to_plotly(x, y, z, colors):
-    # Convert colors to RGB strings for better rendering
-    if colors.ndim == 2 and colors.shape[1] == 3:
-        color_strings = [f'rgb({int(r*255)},{int(g*255)},{int(b*255)})' for r, g, b in colors]
-    else:
-        color_strings = colors
-    
     fig = go.Figure(data=[
         go.Scatter3d(
             x=x, y=y, z=z,
             mode='markers',
             marker=dict(
-                size=3,  # Slightly larger points for better visibility
-                color=color_strings,
-                opacity=0.9,
-                line=dict(width=0)  # Remove point outlines for cleaner look
+                size=2,
+                color=colors,
+                opacity=0.8
             )
         )
     ])
     
-    # Calculate bounds for proper centering
-    x_center, y_center, z_center = np.mean(x), np.mean(y), np.mean(z)
-    x_range = np.max(x) - np.min(x)
-    y_range = np.max(y) - np.min(y)
-    z_range = np.max(z) - np.min(z)
-    max_range = max(x_range, y_range, z_range)
-    
     fig.update_layout(
         scene=dict(
-            xaxis=dict(
-                title='X',
-                range=[x_center - max_range/2, x_center + max_range/2]
-            ),
-            yaxis=dict(
-                title='Y', 
-                range=[y_center - max_range/2, y_center + max_range/2]
-            ),
-            zaxis=dict(
-                title='Z',
-                range=[z_center - max_range/2, z_center + max_range/2]
-            ),
-            aspectmode='cube',
-            camera=dict(
-                eye=dict(x=0, y=-1.5, z=0.5),  # Front-facing view
-                center=dict(x=0, y=0, z=0),
-                up=dict(x=0, y=0, z=1)
-            ),
-            bgcolor='rgb(240, 240, 240)'
+            xaxis_title='X',
+            yaxis_title='Y',
+            zaxis_title='Z',
+            aspectmode='data'
         ),
         width=800,
         height=600,
-        title="3D Point Cloud Reconstruction",
-        showlegend=False
+        title="3D Point Cloud"
     )
     
     return fig
